@@ -1,0 +1,271 @@
+---
+title: "Pokemon Analysis"
+author: "Rohit Ravikumar"
+date: "1/9/2021"
+output: 
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(rvest)
+library(gridExtra)
+```
+
+## Getting the Data
+
+We begin by downloading the table of all Pokemon by base stats from Bulbapedia. By base stat total, here are the weakest Pokemon as of Generation VIII:
+
+<!-- Downloading and parsing the "stat" table -->
+```{r get_stat, echo=FALSE}
+
+stat_url <- "https://bulbapedia.bulbagarden.net/wiki/List_of_Pok%C3%A9mon_by_base_stats_(Generation_VIII-present)"
+stat_page <- read_html(stat_url)
+stat_nodes <- stat_page %>% html_nodes("table")
+stat_table <- html_table(stat_nodes[[2]], fill = TRUE)[,3:11]
+names(stat_table) <- c("Name", "HP", "Atk", "Def", "SpA", "SpD", "Speed", "Total", "Average")
+
+#checking if values are aligned properly
+stopifnot(subset(stat_table$Total, stat_table$Name == "Arceus") == 720) 
+
+```
+
+<!-- printing the table of weakest Pokemon -->
+```{r table_weakest, echo=FALSE}
+
+stat_table %>% arrange(Total) %>% head()
+
+```
+
+And here are the strongest:
+
+<!-- printing the table of strongest Pokemon -->
+```{r table_strongest, echo=FALSE}
+
+stat_table %>% arrange(desc(Total)) %>% head()
+
+```
+
+We're also interested in the usage statistics of various Pokemon on the competitive scene. As of October 2020, here are the most-used (non-banned) competitive Pokemon:
+
+<!-- Downloading and cleaning the "usage" table -->
+```{r get_usage, echo=FALSE}
+
+usage_url <- "https://www.smogon.com/stats/2020-10/gen8ou-0.txt"
+usage_table <- read.csv(url(usage_url), header = FALSE, sep = "|")[6:715, 2:8]
+
+for (i in 1:7) {
+  usage_table[,i] <- trimws(usage_table[,i])
+}
+
+names(usage_table) <- c("Rank", "Name", "UsagePercent", "Raw", "RawPercent", "Real", "RealPercent")
+
+usage_table <- usage_table %>% 
+  mutate(Rank = as.numeric(Rank), 
+         Raw = as.numeric(Raw), 
+         Real = as.numeric(Real), 
+         UsagePercent = as.numeric(gsub("%", "", usage_table$UsagePercent))/100, 
+         RawPercent = as.numeric(gsub("%", "", usage_table$RawPercent))/100, 
+         RealPercent = as.numeric(gsub("%", "", usage_table$RealPercent))/100) 
+#converting characters to numeric
+
+#checking if conversion to numeric worked
+stopifnot(is.numeric(usage_table$RawPercent[20])) 
+
+#checking if values are aligned properly
+stopifnot(subset(usage_table$Real, usage_table$Rank == 30) == 162853) 
+
+```
+
+<!-- printing the table of most used Pokemon -->
+```{r table_mostused, echo=FALSE}
+
+usage_table %>% arrange(Rank) %>% head()
+
+```
+
+Finally, we want to know the types of each Pokemon. Below is a table showing the relative frequency of each primary type (ignoring secondary type for the time being).
+
+<!-- Downloading, parsing, and merging the tables on Pokemon type -->
+```{r get_type, echo = FALSE}
+
+type_url <- "https://bulbapedia.bulbagarden.net/wiki/List_of_Pok%C3%A9mon_by_National_Pok%C3%A9dex_number"
+type_page <- read_html(type_url)
+type_nodes <- type_page %>% html_nodes("table")
+type_table <- html_table(type_nodes[[2]])[,4:6]
+
+for (i in 3:9) {
+  type_table <- rbind(type_table, html_table(type_nodes[[i]])[,4:6])
+}
+
+names(type_table) <- c("Name", "Type1", "Type2")
+
+for (i in 1:length(type_table$Type1)) {
+  if (type_table$Type1[i] == type_table$Type2[i]) {
+    type_table$Type2[i] = NA
+  }
+}
+
+#checking that types and names are aligned
+stopifnot(subset(type_table$Type1, type_table$Name == "Poliwrath") == "Water") 
+
+#checking that conversion to NA was successful
+stopifnot(is.na(subset(type_table$Type2, type_table$Name == "Ditto"))) 
+
+```
+
+
+<!-- Generating a table of Pokemon type frequency -->
+```{r table_type, echo=FALSE, message = FALSE, warning = FALSE}
+
+countfull <- type_table %>%
+  group_by(Type1) %>% 
+  summarize(Count = n()) %>% 
+  arrange(desc(Count))
+countfull
+
+```
+
+Given that certain Pokemon are not allowed in the competitive scene, and Mega Evolutions are double-counting certain Pokemon, combining the three sets of data by Pokemon name reduces our data set to 669 Pokemon. The first few are listed alphabetically here:
+
+<!-- Merging the three tables, dropping any non-matching values by default -->
+```{r merge_tables, echo=FALSE}
+
+pkmn <- merge(stat_table, type_table) %>%
+  merge(usage_table)
+
+head(pkmn)
+
+```
+
+## Analyzing the Data
+
+When looking through this data, the most obvious question to ask is whether Pokemon usage correlates with their stats in any meaningful way. Let's start by looking at the effect of base stat total on rank (we would expect to see a strong negative correlation here, as more powerful Pokemon are naturally more useful competitively):
+
+<!-- Generating a scatterplot of total vs. rank -->
+```{r bst_v_rank, echo=FALSE, message = FALSE, warning = FALSE}
+
+pkmn %>%
+  ggplot(aes(Total, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ poly(x,2)) + scale_y_continuous(limits = c(0, 750))
+
+```
+
+As suspected, there is a strong negative correlation. Notably, the relationship between the two doesn't seem to be entirely linear (which one might expect; jumps in stats seem to have a bigger impact on rank as the former increases). Let's take a look at the results of a quadratic regression here to make sure our findings are statistically significant:
+
+<!-- Performing a polynomial regression on total against rank -->
+```{r reg_bst_v_rank, echo=FALSE}
+
+summary(lm(Rank ~ poly(Total,2), data = pkmn)) 
+
+```
+
+Indeed, we have a high R-squared and statistically significant coefficients; we can be confident that the relationship here is not simply due to chance. It's worth asking the question, though: does this relationship show up for each of the stats individually, or just when they're combined? Below we see the relationship between each of the six stats and rank:
+
+<!-- Generating six scatterplots, one for each stat against rank -->
+```{r six_stats_v_rank, echo=FALSE, message = FALSE, warning = FALSE}
+
+HP_plot <- pkmn %>% ggplot(aes(HP, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+Atk_plot <- pkmn %>% ggplot(aes(Atk, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+Def_plot <- pkmn %>% ggplot(aes(Def, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+SpA_plot <- pkmn %>% ggplot(aes(SpA, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+SpD_plot <- pkmn %>% ggplot(aes(SpD, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+Speed_plot <- pkmn %>% ggplot(aes(Speed, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+grid.arrange(HP_plot, Atk_plot, Def_plot, SpA_plot, SpD_plot, Speed_plot, nrow = 2) #tiling the six plots into two rows
+
+```
+
+It's clear that the correlations become considerably weaker as we separate out each stat, but a negative correlation is still visible for each.
+
+But what will happen if we standardize the stats? Let's take each stat as a percentage of the given Pokemon's stat total (essentially setting all stat totals to 1), and look at how those correlate with rank:
+
+<!-- Generate six new standardized variables, create plots, and tile the plots -->
+```{r standardize_stats, echo=FALSE, message = FALSE, warning = FALSE}
+
+pkmn <- pkmn %>% 
+  mutate(s_HP = HP/Total, s_Atk = Atk/Total, s_Def = Def/Total, s_SpA = SpA/Total, s_SpD = SpD/Total, s_Speed = Speed/Total)
+
+s_HP_plot <- pkmn %>% ggplot(aes(s_HP, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+s_Atk_plot <- pkmn %>% ggplot(aes(s_Atk, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+s_Def_plot <- pkmn %>% ggplot(aes(s_Def, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+s_SpA_plot <- pkmn %>% ggplot(aes(s_SpA, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+s_SpD_plot <- pkmn %>% ggplot(aes(s_SpD, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+s_Speed_plot <- pkmn %>% ggplot(aes(s_Speed, Rank)) + geom_point() + geom_smooth(method = "lm", formula = y ~ x) + scale_y_continuous(limits = c(0, 750))
+
+grid.arrange(s_HP_plot, s_Atk_plot, s_Def_plot, s_SpA_plot, s_SpD_plot, s_Speed_plot, nrow = 2) #tiling the six plots into two rows
+
+```
+
+Here we can see that those negative correlations from each stat all but evaporate when standardized, suggesting that the strength of those negative correlations were due largely to the magnitude of the stat totals, rather than inherent characteristics of each stat.
+
+Finally, we ought to take a look at how usage corresponds to Pokemon type. Observe the below boxplot of primary types compared to percent usage (rather than rank; this will give us better information on how much different Pokemon are actually being used):
+
+<!-- Generate a boxplot looking at the usage percentage of each type -->
+```{r type_boxplot, echo=FALSE}
+
+pkmn %>% 
+  ggplot(aes(Type1, UsagePercent)) + geom_boxplot()
+
+```
+
+Unfortunately, most Pokemon usage percentages seem to be clustered around 0, making a boxplot difficult to read. Let's filter our results to only look at Pokemon with a usage percentage of 0.5% or better. First, let's see how many Pokemon of each primary type made it to that threshold:
+
+<!-- Generate an aggregated table by type of how many Pokemon have 0.5% or higher usage -->
+```{r count_over_threshold, echo=FALSE, message=FALSE, warning=FALSE}
+
+countfiltered <- pkmn %>%
+  filter(UsagePercent > 0.005) %>%
+  group_by(Type1) %>%
+  summarize(Count = n()) %>%
+  arrange(desc(Count))
+countfiltered
+
+```
+
+Water seems like an obvious winner here, but Water is also the most common primary type, as we saw earlier; similarly, Flying being underrepresented is exactly what we would expect given the prior data. If we standardize these values as a percentage of their total representation, we get the following:
+
+<!-- Take the above table and divide each value by the total number of Pokemon in that type (from the earlier table counting them all up) -->
+```{r over_threshold_as_percent, echo=FALSE, message=FALSE, warning=FALSE}
+
+countfiltered %>% mutate(CountPercentage = Count/countfull$Count) %>% arrange(desc(CountPercentage))
+
+```
+
+Conveniently, we find that (though Flying is still an odd outlier), the representation of the various primary types falls within a reasonably narrow band. Now let's take a look at the boxplot of these Pokemon:
+
+<!-- Generate the boxplot for usage percentage over 0.5% for all types -->
+```{r filtered_boxplot, echo=FALSE}
+
+pkmn %>% 
+  filter(UsagePercent > 0.005) %>%
+  ggplot(aes(Type1, UsagePercent)) + geom_boxplot()
+
+```
+
+Though the presence of outliers complicates our analysis somewhat, we can clearly see certain types clustered at lower percentages (most notably Rock), while other types are spread out more and contain a larger percentage of high-usage Pokemon, such as Electric and Fairy.
+
+Finally, let's wrap up here by looking at the difference in rank between Pokemon with and without a second type (again, by using a boxplot).
+
+<!-- Create a boolean variable for having a second type; create a boxplot of rank broken up by that variable -->
+```{r boxplot_type2, echo=FALSE}
+
+pkmn <- pkmn %>%
+  mutate(has_Type2 = !is.na(Type2))
+  
+pkmn %>% ggplot(aes(has_Type2, Rank)) + geom_boxplot()
+
+```
+
+Perhaps unsurprisingly, Pokemon without a second type are quite a bit lower-ranked (with a larger rank number) than those with a second type. 
